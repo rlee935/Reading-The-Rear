@@ -106,25 +106,36 @@ This project implements **YOLOv10**, which removes the need for Non-Maximum Supp
 ---
 
 ## Roadmap
-### Phase 1: Infrastructure & Data (Mar 2 – Mar 22)
-- [x] **Planning & Protocol**: Finalize the data collection plan and symbol taxonomies (Team: Mar 2 – Mar 8).  
-- [x] **Environment Setup**: Configure uv environment with Python 3.12 and CUDA 12.1 (Raymond: Mar 2 – Mar 8).  
-- [x] **Project Scaffolding**: Initialize GitHub repo with .gitignore and pyproject.toml (Raymond: Mar 2 – Mar 8).  
-- [ ] **Data Acquisition**: Capture 5+ hours of MD-based highway/public road footage (Peter: Mar 9 – Mar 15).  
-- [ ] **Detection Pipeline**: Implement YOLOv10 for automated vehicle detection and cropping (Raymond: Mar 16 – Mar 22).  
-- [ ] **Anonymization**: Develop automated Gaussian blurring for license plates (Raymond: Mar 16 – Mar 22).  
-- [ ] **Data Filtering**: Implement two-stage "gatekeeper" filtering to discard vehicles without decals (Peter: Mar 16 – Mar 22).  
 
-### Phase 2: Annotation & Model Training (Mar 23 – Apr 5)
-- [ ] **Manual Annotation**: Label 500+ stickers into categories for training (Adam: Mar 23 – Mar 29).  
-- [ ] **Establish Baseline**: Coordinate human-annotator "Ground Truth" for model benchmarking (Vincent: Mar 23 – Mar 29).  
-- [ ] **Classifier Development**: Train and tune custom neural network for symbol identification (Adam: Mar 30 – Apr 5).  
-- [ ] **Midterm Delivery**: Complete 3-4 page progress report due March 31 (Team: Mar 30 – Apr 5).
+#### Week 1 (Mar 2 – Mar 8)
+- [x] **Planning & Protocol**: Finalize the data collection plan and symbol taxonomies (Team).
+- [x] **Environment Setup**: Configure uv environment with Python 3.12 and CUDA 12.1 (Raymond).
+- [x] **Project Scaffolding**: Initialize GitHub repo with .gitignore and pyproject.toml (Raymond).
 
-### Phase 3: Mitigation & Analysis (Apr 6 – Apr 27)
-- [ ] **Mitigation Testing**: Implement and evaluate digital noise and image reduction algorithms (Vincent: Apr 6 – Apr 12).  
-- [ ] **Quantitative Analysis**: Calculate information exposure metrics and mitigation effectiveness (Vincent: Apr 13 – Apr 19).  
-- [ ] **Final Synthesis**: Document findings in arXiv-style report and prepare final presentation (Team: Apr 20 – Apr 27).
+#### Week 2 (Mar 9 – Mar 15)
+- [ ] **Data Acquisition**: Capture 5+ hours of MD-based highway/public road footage (Peter).
+
+#### Week 3 (Mar 16 – Mar 22)
+- [ ] **Detection Pipeline**: Implement YOLOv10 for automated vehicle detection and cropping (Raymond).
+- [ ] **Anonymization**: Develop automated Gaussian blurring for license plates (Raymond).
+- [ ] **Data Filtering**: Implement two-stage "gatekeeper" filtering to discard vehicles without decals (Peter).
+
+#### Week 4 (Mar 23 – Mar 29)
+- [ ] **Manual Annotation**: Label 500+ stickers into categories for training (Adam).
+- [ ] **Establish Baseline**: Coordinate human-annotator "Ground Truth" for model benchmarking (Vincent).
+
+#### Week 5 (Mar 30 – Apr 5)
+- [ ] **Classifier Development**: Train and tune custom neural network for symbol identification (Adam).
+- [ ] **Midterm Delivery**: Complete 3-4 page progress report due March 31 (Team).
+
+#### Week 6 (Apr 6 – Apr 12)
+- [ ] **Mitigation Testing**: Implement and evaluate digital noise and image reduction algorithms (Vincent).
+
+#### Week 7 (Apr 13 – Apr 19)
+- [ ] **Quantitative Analysis**: Calculate information exposure metrics and mitigation effectiveness (Vincent).
+
+#### Week 8 (Apr 20 – Apr 27)
+- [ ] **Final Synthesis**: Document findings in arXiv-style report and prepare final presentation (Team).
 
 ---
 
