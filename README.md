@@ -108,7 +108,7 @@ This project implements **YOLOv10**, which removes the need for Non-Maximum Supp
 ## Roadmap
 
 #### Week 1 (Mar 2 – Mar 8)
-- [x] **Planning & Protocol**: Finalize the data collection plan and symbol taxonomies (Team).
+- [ ] **Planning & Protocol**: Finalize the data collection plan and symbol taxonomies (Team).
 - [x] **Environment Setup**: Configure uv environment with Python 3.12 and CUDA 12.1 (Raymond).
 - [x] **Project Scaffolding**: Initialize GitHub repo with .gitignore and pyproject.toml (Raymond).
 
