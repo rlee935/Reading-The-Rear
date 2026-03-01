@@ -2,9 +2,31 @@
 
 ## Project Description
 
-Reading-The-Rear investigates the privacy risks associated with high-resolution imagery captured by dashcams and autonomous vehicles . By utilizing YOLOv10, this project quantifies how much personal information—such as political views, religious beliefs, and family composition—is exposed through vehicle rear decals and stickers . These visual markers act as quasi-identifiers, potentially allowing for vehicle re-identification and tracking without license plate data .
+Reading-The-Rear investigates the privacy risks associated with high-resolution imagery captured by dashcams and autonomous vehicles. By utilizing YOLOv10, this project quantifies how much personal information—such as political views, religious beliefs, and family composition—is exposed through vehicle rear decals and stickers. These visual markers act as quasi-identifiers, potentially allowing for vehicle re-identification and tracking without license plate data.
 
-The project aims to evaluate these privacy "leaks" and test mitigations like blurring and digital noise to protect driver anonymity while maintaining camera utility .
+The project aims to evaluate these privacy "leaks" and test mitigations like blurring and digital noise to protect driver anonymity while maintaining camera utility.
+
+## Task Completion List
+
+### Phase 1: Infrastructure & Data (Mar 2 – Mar 22)
+- [x] **Planning & Protocol**: Finalize the data collection plan and symbol taxonomies (Team: Mar 2 – Mar 8).  
+- [x] **Environment Setup**: Configure uv environment with Python 3.12 and CUDA 12.1 (Raymond: Mar 2 – Mar 8).  
+- [x] **Project Scaffolding**: Initialize GitHub repo with .gitignore and pyproject.toml (Raymond: Mar 2 – Mar 8).  
+- [ ] **Data Acquisition**: Capture 5+ hours of MD-based highway/public road footage (Peter: Mar 9 – Mar 15).  
+- [ ] **Detection Pipeline**: Implement YOLOv10 for automated vehicle detection and cropping (Raymond: Mar 16 – Mar 22).  
+- [ ] **Anonymization**: Develop automated Gaussian blurring for license plates (Raymond: Mar 16 – Mar 22).  
+- [ ] **Data Filtering**: Implement two-stage "gatekeeper" filtering to discard vehicles without decals (Peter: Mar 16 – Mar 22).  
+
+### Phase 2: Annotation & Model Training (Mar 23 – Apr 5)
+- [ ] **Manual Annotation**: Label 500+ stickers into categories for training (Adam: Mar 23 – Mar 29).  
+- [ ] **Establish Baseline**: Coordinate human-annotator "Ground Truth" for model benchmarking (Vincent: Mar 23 – Mar 29).  
+- [ ] **Classifier Development**: Train and tune custom neural network for symbol identification (Adam: Mar 30 – Apr 5).  
+- [ ] **Midterm Delivery**: Complete 3-4 page progress report due March 31 (Team: Mar 30 – Apr 5).
+
+### Phase 3: Mitigation & Analysis (Apr 6 – Apr 27)
+- [ ] **Mitigation Testing**: Implement and evaluate digital noise and image reduction algorithms (Vincent: Apr 6 – Apr 12).  
+- [ ] **Quantitative Analysis**: Calculate information exposure metrics and mitigation effectiveness (Vincent: Apr 13 – Apr 19).  
+- [ ] **Final Synthesis**: Document findings in arXiv-style report and prepare final presentation (Team: Apr 20 – Apr 27).
 
 ## Setup and Installation
 
