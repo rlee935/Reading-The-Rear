@@ -108,16 +108,16 @@ This project implements **YOLOv10**, which removes the need for Non-Maximum Supp
 ## Roadmap
 
 #### Week 1 (Mar 2 – Mar 8)
-- [ ] **Planning & Protocol**: Finalize the data collection plan and symbol taxonomies (Team).
+- [x] **Planning & Protocol**: Finalize the data collection plan and symbol taxonomies (Team).
 - [x] **Environment Setup**: Configure uv environment with Python 3.12 and CUDA 12.1 (Raymond).
 - [x] **Project Scaffolding**: Initialize GitHub repo with .gitignore and pyproject.toml (Raymond).
 
 #### Week 2 (Mar 9 – Mar 15)
-- [ ] **Data Acquisition**: Capture 5+ hours of MD-based highway/public road footage (Peter).
+- [x] **Data Acquisition**: Capture 5+ hours of MD-based highway/public road footage (Peter).
 
 #### Week 3 (Mar 16 – Mar 22)
-- [ ] **Detection Pipeline**: Implement YOLOv10 for automated vehicle detection and cropping (Raymond).
-- [ ] **Anonymization**: Develop automated Gaussian blurring for license plates (Raymond).
+- [x] **Detection Pipeline**: Implement YOLOv10 for automated vehicle detection and cropping (Raymond).
+- [x] **Anonymization**: Develop automated Gaussian blurring for license plates (Raymond).
 - [ ] **Data Filtering**: Implement two-stage "gatekeeper" filtering to discard vehicles without decals (Peter).
 
 #### Week 4 (Mar 23 – Mar 29)
