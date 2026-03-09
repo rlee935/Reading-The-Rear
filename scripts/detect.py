@@ -10,11 +10,9 @@ Description:
     to license plate regions to ensure privacy-compliant data handling.
 
 Usage:
-    uv run scripts/detect.py --source data/raw/{FOOTAGE_FOLDER} --save --stride {FRAME_STRIDE} --workers {NUM_WORKERS}
+    uv run scripts/detect.py --source data/{RAW_FOOTAGE_FOLDER} --save --stride {FRAME_STRIDE} --workers {NUM_WORKERS}
 """
-
 import argparse
-import cv2
 import os
 import torch
 from ultralytics import YOLO
@@ -22,200 +20,271 @@ import numpy as np
 from pathlib import Path
 import json
 import hashlib
-from concurrent.futures import ThreadPoolExecutor
 import time
+from tqdm import tqdm
+import multiprocessing as mp
+import traceback
+import cv2
+import queue
+
+torch.backends.cudnn.benchmark = True
 
 def get_file_hash(path):
-    """Generate a simple hash based on mtime and size."""
     stats = os.stat(path)
     return hashlib.md5(f"{path}{stats.st_mtime}{stats.st_size}".encode()).hexdigest()
 
 def load_cache(cache_path):
     if os.path.exists(cache_path):
-        with open(cache_path, 'r') as f:
-            return json.load(f)
+        try:
+            with open(cache_path, 'r') as f:
+                return json.load(f)
+        except: return {}
     return {}
 
 def save_cache(cache, cache_path):
     with open(cache_path, 'w') as f:
         json.dump(cache, f, indent=4)
 
-def preprocess_frame(frame, n):
-    """Placeholder for frame skipping logic."""
-    pass
+# Sentinels
+FILE_DONE = 'FILE_DONE'
+WORKER_DONE = 'WORKER_DONE'
 
-def process_source(source_path, vehicle_model, plate_model, output_dir, show=False, save=True, frame_stride=5):
-    """Process a single video or image file."""
-    cap = cv2.VideoCapture(str(source_path))
-    if not cap.isOpened():
-        print(f"Error: Could not open source {source_path}")
-        return 0
+def video_decoder_worker(files_chunk, stride, frame_queue, error_queue):
+    """Worker Process: Decodes video frames and pushes to GPU queue.
+    Uses cap.set() to seek directly to target frames — no wasted demuxing."""
+    
+    for source_path in files_chunk:
+        source_stem = Path(source_path).stem
+        try:
+            cap = cv2.VideoCapture(str(source_path))
+            if not cap.isOpened():
+                frame_queue.put(FILE_DONE)
+                continue
+            
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if total_frames <= 0:
+                total_frames = 999999  # Unknown length, fall through to grab loop
+            
+            # Jump directly to each target frame
+            target = stride  # first frame to process
+            while target <= total_frames:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, target - 1)
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    break
+                frame_queue.put((source_stem, target, frame))
+                target += stride
+            
+            cap.release()
+                    
+        except Exception as e:
+            error_queue.put(f"{source_path}: {e}")
+        
+        frame_queue.put(FILE_DONE)
+            
+    frame_queue.put(WORKER_DONE)
 
-    frame_count = 0
-    saved_count = 0
-    
-    # Get filename for unique saving if multiple videos
-    source_stem = Path(source_path).stem
-    
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
+def async_writer_worker(write_queue):
+    """Worker Process: Dedicated disk writer for cropped images."""
+    while True:
+        item = write_queue.get()
+        if item is None: break
+        path, img = item
+        cv2.imwrite(path, img)
+
+def gpu_inference_loop(frame_queue, write_queue, active_decoders, weights, plate_weights, output_dir, save, show, total_files):
+    """Main GPU loop: Pulls frames from decoders and processes them."""
+    try:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        print(f"Loading TensorRT engines on {device}...")
+        v_model = YOLO(weights, task='detect')
+        p_model = YOLO(plate_weights, task='detect')
+
+        saved_count = 0
+        frames_processed = 0
+        workers_running = active_decoders
         
-        frame_count += 1
-        if frame_count % frame_stride != 0:
-            continue
-            
-        # Run vehicle detection
-        results = vehicle_model.predict(frame, classes=[2, 5, 7], conf=0.5, verbose=False)[0]
+        pbar = tqdm(total=total_files, desc="Processing", unit="file",
+                    bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} files [{elapsed}<{remaining}, {rate_fmt}] | {postfix}')
+        pbar.set_postfix(frames=0, crops=0)
         
-        for i, box in enumerate(results.boxes):
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            vw_full = x2 - x1
-            vh_full = y2 - y1
-            
-            if vw_full < 80 or vh_full < 80:
+        while workers_running > 0 or not frame_queue.empty():
+            try:
+                item = frame_queue.get(timeout=1.0)
+            except queue.Empty:
                 continue
                 
-            fh, fw_frame, _ = frame.shape
-            pad_w, pad_h = int(vw_full * 0.1), int(vh_full * 0.1)
-            px1_v, py1_v = max(0, x1 - pad_w), max(0, y1 - pad_h)
-            px2_v, py2_v = min(fw_frame, x2 + pad_w), min(fh, y2 + pad_h)
+            if item == WORKER_DONE:
+                workers_running -= 1
+                continue
             
-            vehicle_crop = frame[py1_v:py2_v, px1_v:px2_v].copy()
-            plate_results = plate_model.predict(vehicle_crop, conf=0.4, verbose=False)[0]
-            
-            found_plate = False
-            max_p_conf = 0
-            for p_box in plate_results.boxes:
-                px1, py1, px2, py2 = map(int, p_box.xyxy[0])
-                p_conf = float(p_box.conf[0])
-                max_p_conf = max(max_p_conf, p_conf)
+            if item == FILE_DONE:
+                pbar.update(1)
+                pbar.set_postfix(frames=frames_processed, crops=saved_count)
+                continue
                 
-                plate_roi = vehicle_crop[py1:py2, px1:px2]
-                if plate_roi.size > 0:
-                    blurred_plate = cv2.GaussianBlur(plate_roi, (51, 51), 0)
-                    vehicle_crop[py1:py2, px1:px2] = blurred_plate
-                    found_plate = True
+            source_stem, frame_count, frame = item
+            frames_processed += 1
             
-            if found_plate:
-                if save:
-                    crop_name = f"{source_stem}_f{frame_count}_v{i}.jpg"
-                    cv2.imwrite(os.path.join(output_dir, crop_name), vehicle_crop)
-                    saved_count += 1
-                print(f"  {source_stem} | Frame {frame_count} | Vehicle {i}: saved (Plate conf: {max_p_conf:.2f})")
-        
-        if show:
-            # Draw detections for display
-            display_frame = frame.copy()
-            for box in results.boxes:
-                dx1, dy1, dx2, dy2 = map(int, box.xyxy[0])
-                cv2.rectangle(display_frame, (dx1, dy1), (dx2, dy2), (0, 255, 0), 2)
-            cv2.imshow("Detections", display_frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                cap.release()
-                cv2.destroyAllWindows()
-                return saved_count
-                
-    cap.release()
-    return saved_count
+            # 1. Vehicle Detection
+            results = v_model.predict(frame, classes=[2, 5, 7], conf=0.5, verbose=False, half=True)[0]
+            
+            if not results.boxes:
+                continue
 
-def detect_and_anonymize(source, weights, plate_weights, output_dir, show=False, save=True, frame_stride=5, workers=2, use_cache=True):
-    """
-    YOLOv10 Pipeline: Detect vehicles, use YOLOv8 sub-model to find and blur license plates, and crop rears.
-    Supports directory sources, concurrency, and caching.
-    """
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Using device: {device}")
+            crops_to_process = []
+            crop_meta = []
+            fh, fw, _ = frame.shape
+
+            for i, box in enumerate(results.boxes):
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                vw, vh = x2 - x1, y2 - y1
+                if vw < 80 or vh < 80: continue
+                
+                pw, ph = int(vw * 0.1), int(vh * 0.1)
+                px1, py1 = max(0, x1 - pw), max(0, y1 - ph)
+                px2, py2 = min(fw, x2 + pw), min(fh, y2 + ph)
+                
+                v_crop = frame[py1:py2, px1:px2].copy()
+                crops_to_process.append(v_crop)
+                crop_meta.append({'id': i, 'img': v_crop, 'stem': source_stem, 'fcount': frame_count})
+
+            # 2. Batched Plate Detection
+            if crops_to_process:
+                p_res_list = p_model.predict(crops_to_process, conf=0.4, verbose=False, half=True, batch=len(crops_to_process))
+                
+                for idx, p_res in enumerate(p_res_list):
+                    if not p_res.boxes: continue
+                    
+                    target_img = crop_meta[idx]['img']
+                    for p_box in p_res.boxes:
+                        bx1, by1, bx2, by2 = map(int, p_box.xyxy[0])
+                        roi = target_img[by1:by2, bx1:bx2]
+                        if roi.size > 0:
+                            target_img[by1:by2, bx1:bx2] = cv2.GaussianBlur(roi, (51, 51), 0)
+                    
+                    if save:
+                        meta = crop_meta[idx]
+                        crop_name = f"{meta['stem']}_f{meta['fcount']}_v{meta['id']}.jpg"
+                        write_queue.put((os.path.join(output_dir, crop_name), target_img))
+                        saved_count += 1
+
+            if show:
+                for box in results.boxes:
+                    dx1, dy1, dx2, dy2 = map(int, box.xyxy[0])
+                    cv2.rectangle(frame, (dx1, dy1), (dx2, dy2), (0, 255, 0), 2)
+                cv2.imshow("Detections", frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'): break
+            
+            if frames_processed % 100 == 0:
+                pbar.set_postfix(frames=frames_processed, crops=saved_count)
+                
+        pbar.close()
+        return saved_count
+    except Exception as e:
+        print(f"Inference error: {e}")
+        traceback.print_exc()
+        return 0
+
+def main():
+    parser = argparse.ArgumentParser(description="TensorRT Optimized YOLOv10 Pipeline")
+    parser.add_argument("--source", type=str, required=True, help="Path to video/image folder")
+    parser.add_argument("--weights", type=str, default="models/yolov10n.engine", help="Path to .engine vehicle model")
+    parser.add_argument("--plate-weights", type=str, default="models/plate_detector.engine", help="Path to .engine plate model")
+    parser.add_argument("--output", type=str, default="data/processed/")
+    parser.add_argument("--save", action="store_true")
+    parser.add_argument("--show", action="store_true")
+    parser.add_argument("--stride", type=int, default=5)
+    parser.add_argument("--workers", type=int, default=4, help="Number of parallel CPUs for video decoding")
+    parser.add_argument("--no-cache", action="store_true")
+    args = parser.parse_args()
+
+    os.makedirs(args.output, exist_ok=True)
+    cache_path = os.path.join(args.output, ".processing_cache.json")
+    cache = load_cache(cache_path) if not args.no_cache else {}
+
+    source_p = Path(args.source)
+    all_files = []
     
-    # Initialize models (shared across threads)
-    vehicle_model = YOLO(weights).to(device)
-    plate_model = YOLO(plate_weights).to(device)
-    
-    os.makedirs(output_dir, exist_ok=True)
-    
-    cache_path = os.path.join(output_dir, ".processing_cache.json")
-    cache = load_cache(cache_path) if use_cache else {}
-    
-    source_path = Path(source)
-    files_to_process = []
-    
-    if source_path.is_dir():
-        extensions = ['*.mp4', '*.MP4', '*.avi', '*.mkv', '*.jpg', '*.png']
-        for ext in extensions:
-            files_to_process.extend(list(source_path.glob(ext)))
-        files_to_process = sorted(files_to_process)
+    if source_p.is_dir():
+        exts = {'.mp4', '.MP4', '.avi', '.mkv', '.jpg', '.png'}
+        for root, dirs, files in os.walk(str(source_p), followlinks=True):
+            for file in files:
+                if Path(file).suffix in exts:
+                    all_files.append(Path(root) / file)
     else:
-        files_to_process = [source_path]
+        all_files = [source_p]
     
-    # Filter files using cache
-    if use_cache:
-        original_count = len(files_to_process)
-        files_to_process = [f for f in files_to_process if get_file_hash(f) != cache.get(str(f))]
-        skipped = original_count - len(files_to_process)
-        if skipped > 0:
-            print(f"Skipping {skipped} already processed files (cached).")
-    
-    if not files_to_process:
+    files_to_run = []
+    if not args.no_cache:
+        for f in all_files:
+            if cache.get(str(f)) != get_file_hash(f):
+                files_to_run.append(f)
+        print(f"Skipping {len(all_files) - len(files_to_run)} cached files.")
+    else:
+        files_to_run = all_files
+
+    if not files_to_run:
         print("No new files to process.")
         return
 
-    print(f"Processing {len(files_to_process)} files with {workers} workers...")
-    
-    total_saved = 0
+    print(f"Processing {len(files_to_run)} files...")
     start_time = time.time()
-    
-    import threading
-    cache_lock = threading.Lock()
-    
-    def worker_func(file_path):
-        nonlocal total_saved
-        res = process_source(file_path, vehicle_model, plate_model, output_dir, show, save, frame_stride)
-        if use_cache:
-            with cache_lock:
-                cache[str(file_path)] = get_file_hash(file_path)
-                save_cache(cache, cache_path)
-        return res
 
-    if workers > 1 and len(files_to_process) > 1:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            results = list(executor.map(worker_func, files_to_process))
-            total_saved = sum(results)
-    else:
-        for f in files_to_process:
-            total_saved += worker_func(f)
-            
-    if use_cache:
-        save_cache(cache, cache_path)
-            
-    elapsed = time.time() - start_time
-    print(f"DONE. Finished in {elapsed:.2f}s. Total saved: {total_saved}")
+    # Use raw mp.Queue (pipe-based, no pickling proxy like manager.Queue)
+    mp.set_start_method('spawn', force=True)
+    frame_queue = mp.Queue(maxsize=64)
+    write_queue = mp.Queue()
+    error_queue = mp.Queue()
+
+    # Split files among workers
+    actual_workers = min(args.workers, len(files_to_run))
+    file_chunks = np.array_split(files_to_run, actual_workers)
     
-    if show:
-        cv2.destroyAllWindows()
+    print(f"Starting {actual_workers} CPU decoding workers...")
+    
+    decoder_processes = []
+    for chunk in file_chunks:
+        if len(chunk) > 0:
+            p = mp.Process(target=video_decoder_worker, args=(chunk, args.stride, frame_queue, error_queue))
+            p.start()
+            decoder_processes.append(p)
+
+    writer_process = mp.Process(target=async_writer_worker, args=(write_queue,))
+    writer_process.start()
+    
+    try:
+        total_saved = gpu_inference_loop(
+            frame_queue, write_queue, len(decoder_processes), 
+            args.weights, args.plate_weights, args.output, args.save, args.show,
+            total_files=len(files_to_run)
+        )
+            
+        for f in files_to_run:
+            if not args.no_cache:
+                cache[str(f)] = get_file_hash(f)
+        
+        if not args.no_cache:
+            save_cache(cache, cache_path)
+            
+    except KeyboardInterrupt:
+        print("\nProcess interrupted by user. Saved cache.")
+    except Exception as e:
+        print(f"\nExecution failed: {e}")
+        traceback.print_exc()
+        
+    for p in decoder_processes:
+        p.join()
+        
+    write_queue.put(None)
+    writer_process.join()
+
+    while not error_queue.empty():
+        print(f"Worker Error: {error_queue.get()}")
+
+    elapsed = time.time() - start_time
+    print(f"\nCOMPLETED | Saved: {total_saved} crops | Elapsed: {elapsed:.2f}s | Avg: {(elapsed/len(files_to_run)):.2f}s/file")
+    if args.show: cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="YOLOv10 Vehicle Detection & Anonymization")
-    parser.add_argument("--source", type=str, required=True, help="Path to video or image")
-    parser.add_argument("--weights", type=str, default="models/yolov10n.pt", help="Path to YOLOv10 weights")
-    parser.add_argument("--plate-weights", type=str, default="models/plate_detector.pt", help="Path to plate sub-model weights")
-    parser.add_argument("--output", type=str, default="data/processed/", help="Output directory")
-    parser.add_argument("--save", action="store_true", help="Save crops")
-    parser.add_argument("--show", action="store_true", help="Display stream")
-    parser.add_argument("--stride", type=int, default=5, help="Frame skipping stride")
-    parser.add_argument("--workers", type=int, default=2, help="Number of concurrent workers")
-    parser.add_argument("--no-cache", action="store_true", help="Disable caching")
-    
-    args = parser.parse_args()
-    
-    detect_and_anonymize(
-        args.source, 
-        args.weights, 
-        args.plate_weights,
-        args.output, 
-        show=args.show, 
-        save=args.save, 
-        frame_stride=args.stride,
-        workers=args.workers,
-        use_cache=not args.no_cache
-    )
+    main()
