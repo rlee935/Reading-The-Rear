@@ -1,5 +1,5 @@
 """
-Reading-The-Rear: detect.py
+Reading-The-Rear: 1_detect.py
 --------------------------
 Lead: Raymond Lee (Machine Learning Engineer)
 Task: Week 3 - Preprocessing and Dataset Refinement
@@ -10,7 +10,7 @@ Description:
     to license plate regions to ensure privacy-compliant data handling.
 
 Usage:
-    uv run scripts/detect.py --source data/{RAW_FOOTAGE_FOLDER} --save --stride {FRAME_STRIDE} --workers {NUM_WORKERS}
+    uv run scripts/1_detect.py --source data/{RAW_FOOTAGE_FOLDER} --save --stride {FRAME_STRIDE} --workers {NUM_WORKERS}
 """
 import argparse
 import os
@@ -191,7 +191,7 @@ def main():
     parser.add_argument("--source", type=str, required=True, help="Path to video/image folder")
     parser.add_argument("--weights", type=str, default="models/yolov10n.engine", help="Path to .engine vehicle model")
     parser.add_argument("--plate-weights", type=str, default="models/plate_detector.engine", help="Path to .engine plate model")
-    parser.add_argument("--output", type=str, default="data/processed/")
+    parser.add_argument("--output", type=str, default="data/1_license_plate/")
     parser.add_argument("--save", action="store_true")
     parser.add_argument("--show", action="store_true")
     parser.add_argument("--stride", type=int, default=5)
