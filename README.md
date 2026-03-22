@@ -71,8 +71,8 @@ pip install -r requirements.txt
 The primary entry point is `scripts/detect.py` for processing images and videos.
 
 ```bash
-# Run detection and save cropped vehicle rears
-uv run scripts/detect.py --source data/raw/{MEDIA_FILE} --save --show
+# Step 1: Run detection and save blurred vehicle rears to 1_license_plate/
+uv run scripts/1_detect.py --source data/raw/{MEDIA_FILE} --save
 ```
 
 ---
@@ -81,14 +81,15 @@ uv run scripts/detect.py --source data/raw/{MEDIA_FILE} --save --show
 ```text
 Reading-The-Rear/
 ├── data/
-│   ├── raw/            # Original dashcam footage
-│   └── processed/      # Cropped vehicle rears for identification
+│   ├── raw/                # Original dashcam footage
+│   ├── 1_license_plate/    # Cropped vehicle rears with blurred plates
 ├── models/
-│   └── yolov10n.pt     # Pre-trained weights
-├── scripts/            # Entry points for the pipeline
-│   ├── detect.py       # Detection, cropping, and blurring
-│   └── classify.py     # Custom symbol identification
-├── pyproject.toml      # uv configuration
+│   ├── yolov10n.engine     # Optimized vehicle detection
+│   ├── plate_detector.pt   # License plate detection
+│   └── yolov8s-world.pt    # Zero-shot decal detection
+├── scripts/                # Entry points for the pipeline
+│   ├── 1_detect.py         # Detection, cropping, and blurring
+├── pyproject.toml          # uv configuration
 └── README.md
 ```
 
