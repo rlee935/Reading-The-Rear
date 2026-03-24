@@ -8,7 +8,6 @@ Description:
     Implements the YOLOv10 pipeline to detect vehicles in raw dashcam footage.
     Automates the extraction of vehicle rear crops and applies Gaussian blurring 
     to license plate regions to ensure privacy-compliant data handling.
-    Optimized for RTX 3060 (12GB) with Batch Inference.
 
 Usage:
     uv run scripts/1_detect.py --source data/raw/ --save --stride 30 --workers 8
@@ -28,13 +27,15 @@ import traceback
 import cv2
 import queue
 
-torch.backends.cudnn.benchmark = True
+# --- Utility Functions ---
 
 def get_file_hash(path):
+    """Generates a simple hash based on file stats to track changes."""
     stats = os.stat(path)
     return hashlib.md5(f"{path}{stats.st_mtime}{stats.st_size}".encode()).hexdigest()
 
 def load_cache(cache_path):
+    """Loads the processing cache from a JSON file."""
     if os.path.exists(cache_path):
         try:
             with open(cache_path, 'r') as f:
@@ -43,16 +44,16 @@ def load_cache(cache_path):
     return {}
 
 def save_cache(cache, cache_path):
+    """Saves the processing cache to a JSON file."""
     with open(cache_path, 'w') as f:
         json.dump(cache, f, indent=4)
 
-# Sentinels
 FILE_DONE = 'FILE_DONE'
 WORKER_DONE = 'WORKER_DONE'
 
 def video_decoder_worker(files_chunk, stride, frame_queue, error_queue):
-    """Worker Process: Decodes video frames and pushes to GPU queue."""
-    cv2.setNumThreads(0) # Reduce CPU overhead/contention
+    """Worker Process: Decodes video frames and pushes them to the frame queue."""
+    cv2.setNumThreads(0)
     
     for source_path in files_chunk:
         source_stem = Path(source_path).stem
@@ -64,13 +65,14 @@ def video_decoder_worker(files_chunk, stride, frame_queue, error_queue):
             
             frame_idx = 0
             while True:
+                # Only process every Nth frame (stride)
                 if frame_idx % stride == 0:
                     ret, frame = cap.read()
                     if not ret or frame is None:
                         break
                     frame_queue.put((source_stem, frame_idx + 1, frame))
                 else:
-                    ret = cap.grab()
+                    ret = cap.grab() # Faster than read() when skipping frames
                     if not ret:
                         break
                 frame_idx += 1
@@ -85,7 +87,7 @@ def video_decoder_worker(files_chunk, stride, frame_queue, error_queue):
     frame_queue.put(WORKER_DONE)
 
 def async_writer_worker(write_queue):
-    """Worker Process: Dedicated disk writer for cropped images."""
+    """Worker Process: Handles file I/O operations in a separate process."""
     while True:
         item = write_queue.get()
         if item is None: break
@@ -93,8 +95,9 @@ def async_writer_worker(write_queue):
         cv2.imwrite(path, img)
 
 def gpu_inference_loop(frame_queue, write_queue, active_decoders, weights, plate_weights, output_dir, save, show, total_files, batch_size=16, total_frames=None):
-    """Main GPU loop: Pulls frames from decoders and processes them in batches."""
+    """Main GPU loop: Orchestrates detection models and processes frame batches."""
     try:
+        # Load YOLO models
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if device == 'cuda':
             print(f"Loading TensorRT/CUDA engines on {device} (Batch Size: {batch_size})...")
@@ -109,6 +112,7 @@ def gpu_inference_loop(frame_queue, write_queue, active_decoders, weights, plate
         files_completed = 0
         workers_running = active_decoders
         
+        # Initialize progress bar
         pbar = tqdm(total=total_frames, desc="Processing", unit="frame",
                     bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} frames [{elapsed}<{remaining}, {rate_fmt}] | {postfix}')
         pbar.set_postfix(files=f"0/{total_files}", crops=0)
@@ -117,11 +121,11 @@ def gpu_inference_loop(frame_queue, write_queue, active_decoders, weights, plate
         batch_meta = []
 
         def process_batch(frames, metas):
+            """Internal helper to run inference on a batch of frames."""
             nonlocal saved_count
             if not frames: return
             
-            # 1. Batch Vehicle Detection
-            # Use half=True only on CUDA
+            # 1. Detect Vehicles (Cars, Buses, Trucks)
             use_half = (device == 'cuda')
             v_results = v_model.predict(frames, classes=[2, 5, 7], conf=0.5, verbose=False, half=use_half, batch=len(frames))
             
@@ -139,9 +143,9 @@ def gpu_inference_loop(frame_queue, write_queue, active_decoders, weights, plate
                 for i, box in enumerate(res.boxes):
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     vw, vh = x2 - x1, y2 - y1
-                    if vw < 80 or vh < 80: continue
+                    if vw < 80 or vh < 80: continue # Skip small detections
                     
-                    # Padding for context
+                    # Add 10% padding for better context
                     pw, ph = int(vw * 0.1), int(vh * 0.1)
                     px1, py1 = max(0, x1 - pw), max(0, y1 - ph)
                     px2, py2 = min(fw, x2 + pw), min(fh, y2 + ph)
@@ -150,27 +154,28 @@ def gpu_inference_loop(frame_queue, write_queue, active_decoders, weights, plate
                     all_v_crops.append(v_crop)
                     all_v_meta.append({'stem': source_stem, 'fcount': frame_count, 'id': i})
 
-            # 2. Batch Plate Detection on the Vehicle Crops
+            # 2. Detect and Blur License Plates on Vehicle Crops
             if all_v_crops:
                 p_results = p_model.predict(all_v_crops, conf=0.4, verbose=False, half=use_half, batch=len(all_v_crops))
                 
                 for idx, p_res in enumerate(p_results):
                     target_img = all_v_crops[idx]
                     
-                    # Blur any detected plates
+                    # Apply Gaussian Blur to any detected plates for privacy
                     for p_box in p_res.boxes:
                         bx1, by1, bx2, by2 = map(int, p_box.xyxy[0])
                         roi = target_img[by1:by2, bx1:bx2]
                         if roi.size > 0:
                             target_img[by1:by2, bx1:bx2] = cv2.GaussianBlur(roi, (51, 51), 0)
                     
-                    # Save the blurred crop
+                    # Queue the blurred image for saving
                     if save:
                         meta = all_v_meta[idx]
                         crop_name = f"{meta['stem']}_f{meta['fcount']}_v{meta['id']}.jpg"
                         write_queue.put((os.path.join(output_dir, crop_name), target_img))
                         saved_count += 1
 
+        # Main processing loop: Collect frames into batches
         while workers_running > 0 or not frame_queue.empty():
             try:
                 item = frame_queue.get(timeout=0.1)
@@ -197,6 +202,7 @@ def gpu_inference_loop(frame_queue, write_queue, active_decoders, weights, plate
             batch_frames.append(frame)
             batch_meta.append({'stem': source_stem, 'fcount': frame_count})
 
+            # Run inference when batch size is reached
             if len(batch_frames) >= batch_size:
                 process_batch(batch_frames, batch_meta)
                 pbar.update(len(batch_frames))
@@ -204,11 +210,10 @@ def gpu_inference_loop(frame_queue, write_queue, active_decoders, weights, plate
                 pbar.set_postfix(files=f"{files_completed}/{total_files}", crops=saved_count)
             
             if show:
-                # Basic visualization for show mode (doesn't support batching easily)
                 cv2.imshow("Processing", frame)
                 if cv2.waitKey(1) & 0xFF == ord('q'): break
         
-        # Final cleanup
+        # Flush any remaining frames in the final batch
         if batch_frames:
             process_batch(batch_frames, batch_meta)
             pbar.update(len(batch_frames))
@@ -220,6 +225,7 @@ def gpu_inference_loop(frame_queue, write_queue, active_decoders, weights, plate
         return 0
 
 def main():
+    # Setup CLI Arguments
     parser = argparse.ArgumentParser(description="Batch Optimized YOLO Pipeline")
     parser.add_argument("--source", type=str, required=True, help="Path to video/image folder")
     parser.add_argument("--weights", type=str, default="models/yolov10n.pt", help="Path to .pt vehicle model")
@@ -233,10 +239,12 @@ def main():
     parser.add_argument("--no-cache", action="store_true")
     args = parser.parse_args()
 
+    # Initialize output directory and cache
     os.makedirs(args.output, exist_ok=True)
     cache_path = os.path.join(args.output, ".processing_cache.json")
     cache = load_cache(cache_path) if not args.no_cache else {}
 
+    # Discover files to process
     source_p = Path(args.source)
     all_files = []
     
@@ -249,6 +257,7 @@ def main():
     else:
         all_files = [source_p]
     
+    # Filter files based on cache
     files_to_run = []
     if not args.no_cache:
         for f in all_files:
@@ -273,11 +282,13 @@ def main():
 
     start_time = time.time()
 
+    # Setup Multiprocessing
     mp.set_start_method('spawn', force=True)
-    frame_queue = mp.Queue(maxsize=128) # Larger queue for batched processing
+    frame_queue = mp.Queue(maxsize=128)
     write_queue = mp.Queue()
     error_queue = mp.Queue()
 
+    # Launch Decoder Processes
     actual_workers = min(args.workers, len(files_to_run))
     file_chunks = np.array_split(files_to_run, actual_workers)
     
@@ -290,10 +301,12 @@ def main():
             p.start()
             decoder_processes.append(p)
 
+    # Launch Writer Process
     writer_process = mp.Process(target=async_writer_worker, args=(write_queue,))
     writer_process.start()
     
     try:
+        # Run GPU inference (main loop)
         total_saved = gpu_inference_loop(
             frame_queue, write_queue, len(decoder_processes), 
             args.weights, args.plate_weights, args.output, args.save, args.show,
@@ -302,6 +315,7 @@ def main():
             total_frames=total_frames
         )
             
+        # Update cache after successful processing
         for f in files_to_run:
             if not args.no_cache:
                 cache[str(f)] = get_file_hash(f)
@@ -315,6 +329,7 @@ def main():
         print(f"\nExecution failed: {e}")
         traceback.print_exc()
         
+    # Final cleanup of processes
     for p in decoder_processes:
         p.join()
         
