@@ -8,9 +8,10 @@ Description:
     Implements the YOLOv10 pipeline to detect vehicles in raw dashcam footage.
     Automates the extraction of vehicle rear crops and applies Gaussian blurring 
     to license plate regions to ensure privacy-compliant data handling.
+    Optimized for RTX 3060 (12GB) with Batch Inference.
 
 Usage:
-    uv run scripts/1_detect.py --source data/{RAW_FOOTAGE_FOLDER} --save --stride {FRAME_STRIDE} --workers {NUM_WORKERS}
+    uv run scripts/1_detect.py --source data/raw/ --save --stride 30 --workers 8
 """
 import argparse
 import os
@@ -50,8 +51,8 @@ FILE_DONE = 'FILE_DONE'
 WORKER_DONE = 'WORKER_DONE'
 
 def video_decoder_worker(files_chunk, stride, frame_queue, error_queue):
-    """Worker Process: Decodes video frames and pushes to GPU queue.
-    Uses cap.set() to seek directly to target frames — no wasted demuxing."""
+    """Worker Process: Decodes video frames and pushes to GPU queue."""
+    cv2.setNumThreads(0) # Reduce CPU overhead/contention
     
     for source_path in files_chunk:
         source_stem = Path(source_path).stem
@@ -61,19 +62,18 @@ def video_decoder_worker(files_chunk, stride, frame_queue, error_queue):
                 frame_queue.put(FILE_DONE)
                 continue
             
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            if total_frames <= 0:
-                total_frames = 999999  # Unknown length, fall through to grab loop
-            
-            # Jump directly to each target frame
-            target = stride  # first frame to process
-            while target <= total_frames:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, target - 1)
-                ret, frame = cap.read()
-                if not ret or frame is None:
-                    break
-                frame_queue.put((source_stem, target, frame))
-                target += stride
+            frame_idx = 0
+            while True:
+                if frame_idx % stride == 0:
+                    ret, frame = cap.read()
+                    if not ret or frame is None:
+                        break
+                    frame_queue.put((source_stem, frame_idx + 1, frame))
+                else:
+                    ret = cap.grab()
+                    if not ret:
+                        break
+                frame_idx += 1
             
             cap.release()
                     
@@ -92,11 +92,11 @@ def async_writer_worker(write_queue):
         path, img = item
         cv2.imwrite(path, img)
 
-def gpu_inference_loop(frame_queue, write_queue, active_decoders, weights, plate_weights, output_dir, save, show, total_files):
-    """Main GPU loop: Pulls frames from decoders and processes them."""
+def gpu_inference_loop(frame_queue, write_queue, active_decoders, weights, plate_weights, output_dir, save, show, total_files, batch_size=16):
+    """Main GPU loop: Pulls frames from decoders and processes them in batches."""
     try:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        print(f"Loading TensorRT engines on {device}...")
+        print(f"Loading TensorRT engines on {device} (Batch Size: {batch_size})...")
         v_model = YOLO(weights, task='detect')
         p_model = YOLO(plate_weights, task='detect')
 
@@ -108,10 +108,69 @@ def gpu_inference_loop(frame_queue, write_queue, active_decoders, weights, plate
                     bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} files [{elapsed}<{remaining}, {rate_fmt}] | {postfix}')
         pbar.set_postfix(frames=0, crops=0)
         
+        batch_frames = []
+        batch_meta = []
+
+        def process_batch(frames, metas):
+            nonlocal saved_count
+            if not frames: return
+            
+            # 1. Batch Vehicle Detection
+            v_results = v_model.predict(frames, classes=[2, 5, 7], conf=0.5, verbose=False, half=True, batch=len(frames))
+            
+            all_v_crops = []
+            all_v_meta = []
+
+            for f_idx, res in enumerate(v_results):
+                if not res.boxes: continue
+                
+                frame = frames[f_idx]
+                source_stem = metas[f_idx]['stem']
+                frame_count = metas[f_idx]['fcount']
+                fh, fw, _ = frame.shape
+
+                for i, box in enumerate(res.boxes):
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    vw, vh = x2 - x1, y2 - y1
+                    if vw < 80 or vh < 80: continue
+                    
+                    # Padding for context
+                    pw, ph = int(vw * 0.1), int(vh * 0.1)
+                    px1, py1 = max(0, x1 - pw), max(0, y1 - ph)
+                    px2, py2 = min(fw, x2 + pw), min(fh, y2 + ph)
+                    
+                    v_crop = frame[py1:py2, px1:px2].copy()
+                    all_v_crops.append(v_crop)
+                    all_v_meta.append({'stem': source_stem, 'fcount': frame_count, 'id': i})
+
+            # 2. Batch Plate Detection on the Vehicle Crops
+            if all_v_crops:
+                p_results = p_model.predict(all_v_crops, conf=0.4, verbose=False, half=True, batch=len(all_v_crops))
+                
+                for idx, p_res in enumerate(p_results):
+                    target_img = all_v_crops[idx]
+                    
+                    # Blur any detected plates
+                    for p_box in p_res.boxes:
+                        bx1, by1, bx2, by2 = map(int, p_box.xyxy[0])
+                        roi = target_img[by1:by2, bx1:bx2]
+                        if roi.size > 0:
+                            target_img[by1:by2, bx1:bx2] = cv2.GaussianBlur(roi, (51, 51), 0)
+                    
+                    # Save the blurred crop
+                    if save:
+                        meta = all_v_meta[idx]
+                        crop_name = f"{meta['stem']}_f{meta['fcount']}_v{meta['id']}.jpg"
+                        write_queue.put((os.path.join(output_dir, crop_name), target_img))
+                        saved_count += 1
+
         while workers_running > 0 or not frame_queue.empty():
             try:
-                item = frame_queue.get(timeout=1.0)
+                item = frame_queue.get(timeout=0.1)
             except queue.Empty:
+                if batch_frames:
+                    process_batch(batch_frames, batch_meta)
+                    batch_frames, batch_meta = [], []
                 continue
                 
             if item == WORKER_DONE:
@@ -119,66 +178,32 @@ def gpu_inference_loop(frame_queue, write_queue, active_decoders, weights, plate
                 continue
             
             if item == FILE_DONE:
+                if batch_frames:
+                    process_batch(batch_frames, batch_meta)
+                    batch_frames, batch_meta = [], []
                 pbar.update(1)
                 pbar.set_postfix(frames=frames_processed, crops=saved_count)
                 continue
                 
             source_stem, frame_count, frame = item
             frames_processed += 1
+            batch_frames.append(frame)
+            batch_meta.append({'stem': source_stem, 'fcount': frame_count})
+
+            if len(batch_frames) >= batch_size:
+                process_batch(batch_frames, batch_meta)
+                batch_frames, batch_meta = [], []
             
-            # 1. Vehicle Detection
-            results = v_model.predict(frame, classes=[2, 5, 7], conf=0.5, verbose=False, half=True)[0]
-            
-            if not results.boxes:
-                continue
-
-            crops_to_process = []
-            crop_meta = []
-            fh, fw, _ = frame.shape
-
-            for i, box in enumerate(results.boxes):
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                vw, vh = x2 - x1, y2 - y1
-                if vw < 80 or vh < 80: continue
-                
-                pw, ph = int(vw * 0.1), int(vh * 0.1)
-                px1, py1 = max(0, x1 - pw), max(0, y1 - ph)
-                px2, py2 = min(fw, x2 + pw), min(fh, y2 + ph)
-                
-                v_crop = frame[py1:py2, px1:px2].copy()
-                crops_to_process.append(v_crop)
-                crop_meta.append({'id': i, 'img': v_crop, 'stem': source_stem, 'fcount': frame_count})
-
-            # 2. Batched Plate Detection
-            if crops_to_process:
-                p_res_list = p_model.predict(crops_to_process, conf=0.4, verbose=False, half=True, batch=len(crops_to_process))
-                
-                for idx, p_res in enumerate(p_res_list):
-                    if not p_res.boxes: continue
-                    
-                    target_img = crop_meta[idx]['img']
-                    for p_box in p_res.boxes:
-                        bx1, by1, bx2, by2 = map(int, p_box.xyxy[0])
-                        roi = target_img[by1:by2, bx1:bx2]
-                        if roi.size > 0:
-                            target_img[by1:by2, bx1:bx2] = cv2.GaussianBlur(roi, (51, 51), 0)
-                    
-                    if save:
-                        meta = crop_meta[idx]
-                        crop_name = f"{meta['stem']}_f{meta['fcount']}_v{meta['id']}.jpg"
-                        write_queue.put((os.path.join(output_dir, crop_name), target_img))
-                        saved_count += 1
-
             if show:
-                for box in results.boxes:
-                    dx1, dy1, dx2, dy2 = map(int, box.xyxy[0])
-                    cv2.rectangle(frame, (dx1, dy1), (dx2, dy2), (0, 255, 0), 2)
-                cv2.imshow("Detections", frame)
+                # Basic visualization for show mode (doesn't support batching easily)
+                cv2.imshow("Processing", frame)
                 if cv2.waitKey(1) & 0xFF == ord('q'): break
             
             if frames_processed % 100 == 0:
                 pbar.set_postfix(frames=frames_processed, crops=saved_count)
-                
+        
+        # Final cleanup
+        process_batch(batch_frames, batch_meta)
         pbar.close()
         return saved_count
     except Exception as e:
@@ -187,15 +212,16 @@ def gpu_inference_loop(frame_queue, write_queue, active_decoders, weights, plate
         return 0
 
 def main():
-    parser = argparse.ArgumentParser(description="TensorRT Optimized YOLOv10 Pipeline")
+    parser = argparse.ArgumentParser(description="Batch Optimized YOLO Pipeline")
     parser.add_argument("--source", type=str, required=True, help="Path to video/image folder")
-    parser.add_argument("--weights", type=str, default="models/yolov10n.engine", help="Path to .engine vehicle model")
-    parser.add_argument("--plate-weights", type=str, default="models/plate_detector.engine", help="Path to .engine plate model")
+    parser.add_argument("--weights", type=str, default="models/yolov10n.pt", help="Path to .pt vehicle model")
+    parser.add_argument("--plate-weights", type=str, default="models/plate_detector.pt", help="Path to .pt plate model")
     parser.add_argument("--output", type=str, default="data/1_license_plate/")
     parser.add_argument("--save", action="store_true")
     parser.add_argument("--show", action="store_true")
-    parser.add_argument("--stride", type=int, default=5)
-    parser.add_argument("--workers", type=int, default=4, help="Number of parallel CPUs for video decoding")
+    parser.add_argument("--stride", type=int, default=10)
+    parser.add_argument("--workers", type=int, default=8, help="Number of parallel CPUs for video decoding")
+    parser.add_argument("--batch", type=int, default=16, help="GPU Batch Size")
     parser.add_argument("--no-cache", action="store_true")
     args = parser.parse_args()
 
@@ -231,13 +257,11 @@ def main():
     print(f"Processing {len(files_to_run)} files...")
     start_time = time.time()
 
-    # Use raw mp.Queue (pipe-based, no pickling proxy like manager.Queue)
     mp.set_start_method('spawn', force=True)
-    frame_queue = mp.Queue(maxsize=64)
+    frame_queue = mp.Queue(maxsize=128) # Larger queue for batched processing
     write_queue = mp.Queue()
     error_queue = mp.Queue()
 
-    # Split files among workers
     actual_workers = min(args.workers, len(files_to_run))
     file_chunks = np.array_split(files_to_run, actual_workers)
     
@@ -257,7 +281,8 @@ def main():
         total_saved = gpu_inference_loop(
             frame_queue, write_queue, len(decoder_processes), 
             args.weights, args.plate_weights, args.output, args.save, args.show,
-            total_files=len(files_to_run)
+            total_files=len(files_to_run),
+            batch_size=args.batch
         )
             
         for f in files_to_run:
