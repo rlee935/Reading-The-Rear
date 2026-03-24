@@ -92,21 +92,26 @@ def async_writer_worker(write_queue):
         path, img = item
         cv2.imwrite(path, img)
 
-def gpu_inference_loop(frame_queue, write_queue, active_decoders, weights, plate_weights, output_dir, save, show, total_files, batch_size=16):
+def gpu_inference_loop(frame_queue, write_queue, active_decoders, weights, plate_weights, output_dir, save, show, total_files, batch_size=16, total_frames=None):
     """Main GPU loop: Pulls frames from decoders and processes them in batches."""
     try:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        print(f"Loading TensorRT engines on {device} (Batch Size: {batch_size})...")
+        if device == 'cuda':
+            print(f"Loading TensorRT/CUDA engines on {device} (Batch Size: {batch_size})...")
+        else:
+            print(f"Loading YOLO models on {device} (Batch Size: {batch_size})...")
+            
         v_model = YOLO(weights, task='detect')
         p_model = YOLO(plate_weights, task='detect')
 
         saved_count = 0
         frames_processed = 0
+        files_completed = 0
         workers_running = active_decoders
         
-        pbar = tqdm(total=total_files, desc="Processing", unit="file",
-                    bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} files [{elapsed}<{remaining}, {rate_fmt}] | {postfix}')
-        pbar.set_postfix(frames=0, crops=0)
+        pbar = tqdm(total=total_frames, desc="Processing", unit="frame",
+                    bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} frames [{elapsed}<{remaining}, {rate_fmt}] | {postfix}')
+        pbar.set_postfix(files=f"0/{total_files}", crops=0)
         
         batch_frames = []
         batch_meta = []
@@ -116,7 +121,9 @@ def gpu_inference_loop(frame_queue, write_queue, active_decoders, weights, plate
             if not frames: return
             
             # 1. Batch Vehicle Detection
-            v_results = v_model.predict(frames, classes=[2, 5, 7], conf=0.5, verbose=False, half=True, batch=len(frames))
+            # Use half=True only on CUDA
+            use_half = (device == 'cuda')
+            v_results = v_model.predict(frames, classes=[2, 5, 7], conf=0.5, verbose=False, half=use_half, batch=len(frames))
             
             all_v_crops = []
             all_v_meta = []
@@ -145,7 +152,7 @@ def gpu_inference_loop(frame_queue, write_queue, active_decoders, weights, plate
 
             # 2. Batch Plate Detection on the Vehicle Crops
             if all_v_crops:
-                p_results = p_model.predict(all_v_crops, conf=0.4, verbose=False, half=True, batch=len(all_v_crops))
+                p_results = p_model.predict(all_v_crops, conf=0.4, verbose=False, half=use_half, batch=len(all_v_crops))
                 
                 for idx, p_res in enumerate(p_results):
                     target_img = all_v_crops[idx]
@@ -181,8 +188,8 @@ def gpu_inference_loop(frame_queue, write_queue, active_decoders, weights, plate
                 if batch_frames:
                     process_batch(batch_frames, batch_meta)
                     batch_frames, batch_meta = [], []
-                pbar.update(1)
-                pbar.set_postfix(frames=frames_processed, crops=saved_count)
+                files_completed += 1
+                pbar.set_postfix(files=f"{files_completed}/{total_files}", crops=saved_count)
                 continue
                 
             source_stem, frame_count, frame = item
@@ -192,18 +199,19 @@ def gpu_inference_loop(frame_queue, write_queue, active_decoders, weights, plate
 
             if len(batch_frames) >= batch_size:
                 process_batch(batch_frames, batch_meta)
+                pbar.update(len(batch_frames))
                 batch_frames, batch_meta = [], []
+                pbar.set_postfix(files=f"{files_completed}/{total_files}", crops=saved_count)
             
             if show:
                 # Basic visualization for show mode (doesn't support batching easily)
                 cv2.imshow("Processing", frame)
                 if cv2.waitKey(1) & 0xFF == ord('q'): break
-            
-            if frames_processed % 100 == 0:
-                pbar.set_postfix(frames=frames_processed, crops=saved_count)
         
         # Final cleanup
-        process_batch(batch_frames, batch_meta)
+        if batch_frames:
+            process_batch(batch_frames, batch_meta)
+            pbar.update(len(batch_frames))
         pbar.close()
         return saved_count
     except Exception as e:
@@ -255,6 +263,14 @@ def main():
         return
 
     print(f"Processing {len(files_to_run)} files...")
+    
+    # Estimate total frames for progress bar
+    total_frames = 0
+    for f in files_to_run:
+        cap = cv2.VideoCapture(str(f))
+        total_frames += int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) // args.stride
+        cap.release()
+
     start_time = time.time()
 
     mp.set_start_method('spawn', force=True)
@@ -282,7 +298,8 @@ def main():
             frame_queue, write_queue, len(decoder_processes), 
             args.weights, args.plate_weights, args.output, args.save, args.show,
             total_files=len(files_to_run),
-            batch_size=args.batch
+            batch_size=args.batch,
+            total_frames=total_frames
         )
             
         for f in files_to_run:
