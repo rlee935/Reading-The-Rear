@@ -71,8 +71,8 @@ pip install -r requirements.txt
 The primary entry point is `scripts/detect.py` for processing images and videos.
 
 ```bash
-# Run detection and save cropped vehicle rears
-uv run scripts/detect.py --source data/raw/{MEDIA_FILE} --save --show
+# Step 1: Run detection and save blurred vehicle rears to 1_license_plate/
+uv run scripts/1_detect.py --source data/raw/{MEDIA_FILE} --save
 ```
 
 ---
@@ -81,14 +81,15 @@ uv run scripts/detect.py --source data/raw/{MEDIA_FILE} --save --show
 ```text
 Reading-The-Rear/
 ├── data/
-│   ├── raw/            # Original dashcam footage
-│   └── processed/      # Cropped vehicle rears for identification
+│   ├── raw/                # Original dashcam footage
+│   ├── 1_license_plate/    # Cropped vehicle rears with blurred plates
 ├── models/
-│   └── yolov10n.pt     # Pre-trained weights
-├── scripts/            # Entry points for the pipeline
-│   ├── detect.py       # Detection, cropping, and blurring
-│   └── classify.py     # Custom symbol identification
-├── pyproject.toml      # uv configuration
+│   ├── yolov10n.engine     # Optimized vehicle detection
+│   ├── plate_detector.pt   # License plate detection
+│   └── yolov8s-world.pt    # Zero-shot decal detection
+├── scripts/                # Entry points for the pipeline
+│   ├── 1_detect.py         # Detection, cropping, and blurring
+├── pyproject.toml          # uv configuration
 └── README.md
 ```
 
@@ -108,16 +109,16 @@ This project implements **YOLOv10**, which removes the need for Non-Maximum Supp
 ## Roadmap
 
 #### Week 1 (Mar 2 – Mar 8)
-- [ ] **Planning & Protocol**: Finalize the data collection plan and symbol taxonomies (Team).
+- [x] **Planning & Protocol**: Finalize the data collection plan and symbol taxonomies (Team).
 - [x] **Environment Setup**: Configure uv environment with Python 3.12 and CUDA 12.1 (Raymond).
 - [x] **Project Scaffolding**: Initialize GitHub repo with .gitignore and pyproject.toml (Raymond).
 
 #### Week 2 (Mar 9 – Mar 15)
-- [ ] **Data Acquisition**: Capture 5+ hours of MD-based highway/public road footage (Peter).
+- [x] **Data Acquisition**: Capture 5+ hours of MD-based highway/public road footage (Peter).
 
 #### Week 3 (Mar 16 – Mar 22)
-- [ ] **Detection Pipeline**: Implement YOLOv10 for automated vehicle detection and cropping (Raymond).
-- [ ] **Anonymization**: Develop automated Gaussian blurring for license plates (Raymond).
+- [x] **Detection Pipeline**: Implement YOLOv10 for automated vehicle detection and cropping (Raymond).
+- [x] **Anonymization**: Develop automated Gaussian blurring for license plates (Raymond).
 - [ ] **Data Filtering**: Implement two-stage "gatekeeper" filtering to discard vehicles without decals (Peter).
 
 #### Week 4 (Mar 23 – Mar 29)
